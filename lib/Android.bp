@@ -7,6 +7,7 @@ package {
 
 rust_library {
     name: "libv4l2r",
+    host_supported: true,
     crate_name: "v4l2r",
     cargo_env_compat: true,
     cargo_pkg_version: "0.0.4",
@@ -33,12 +34,16 @@ rust_library {
 
 rust_test {
     name: "v4l2r_test_src_lib",
+    host_supported: true,
     crate_name: "v4l2r",
     cargo_env_compat: true,
     cargo_pkg_version: "0.0.4",
     crate_root: "src/lib.rs",
     test_suites: ["general-tests"],
     auto_gen_config: true,
+    test_options: {
+        unit_test: true,
+    },
     edition: "2021",
     rustlibs: [
         "libanyhow",
