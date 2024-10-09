@@ -1,0 +1,13 @@
+name: "v4l2r"
+description: "Rust bindings for V4L2"
+third_party: {
+  identifier {
+    type: "Git"
+    value: "https://github.com/Gnurou/v4l2r"
+    primary_source: true
+    version: "v0.0.4"
+  }
+  version: "v0.0.4"
+  last_upgrade_date { year: 2024 month: 9 day: 20 }
+  license_type: NOTICE
+}
