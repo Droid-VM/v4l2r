@@ -7,13 +7,9 @@ use crate::{
         queue::{
             direction::{Capture, Output},
             handles_provider::HandlesProvider,
-            qbuf::{
-                get_free::{GetFreeBufferError, GetFreeCaptureBuffer, GetFreeOutputBuffer},
-                get_indexed::GetCaptureBufferByIndex,
-                OutputQueueableProvider,
-            },
-            BuffersAllocated, CreateQueueError, FormatBuilder, Queue, QueueInit,
-            RequestBuffersError,
+            BuffersAllocated, CreateQueueError, FormatBuilder, GetCaptureBufferByIndex,
+            GetFreeBufferError, GetFreeCaptureBuffer, GetFreeOutputBuffer, OutputQueueableProvider,
+            Queue, QueueInit, RequestBuffersError,
         },
         AllocatedQueue, Device, DeviceConfig, DeviceOpenError, Stream, TryDequeue,
     },
