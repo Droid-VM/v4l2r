@@ -5,8 +5,6 @@ pub mod generic;
 pub mod handles_provider;
 pub mod qbuf;
 
-use self::qbuf::{get_free::GetFreeOutputBuffer, get_indexed::GetOutputBufferByIndex};
-
 use super::{AllocatedQueue, Device, FreeBuffersResult, Stream, TryDequeue};
 use crate::ioctl::{DqBufResult, QueryBufError, V4l2BufferFromError};
 use crate::{bindings, memory::*};
@@ -21,13 +19,8 @@ use crate::{Format, PixelFormat, QueueType};
 use buffer::*;
 use direction::*;
 use dqbuf::*;
-use generic::{GenericBufferHandles, GenericQBuffer, GenericSupportedMemoryType};
 use log::debug;
-use qbuf::{
-    get_free::{GetFreeBufferError, GetFreeCaptureBuffer},
-    get_indexed::{GetCaptureBufferByIndex, TryGetBufferError},
-    *,
-};
+use qbuf::*;
 
 use std::convert::{Infallible, TryFrom};
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -37,7 +30,7 @@ use thiserror::Error;
 /// Base values of a queue, that are always value no matter the state the queue
 /// is in. This base object remains alive as long as the queue is borrowed from
 /// the `Device`.
-pub struct QueueBase {
+struct QueueBase {
     // Reference to the device, so we can perform operations on its `fd` and to let us mark the
     // queue as free again upon destruction.
     device: Arc<Device>,
@@ -116,8 +109,8 @@ where
     }
 
     /// Returns an iterator over all the formats currently supported by this queue.
-    pub fn format_iter(&self) -> ioctl::FormatIterator<QueueBase> {
-        ioctl::FormatIterator::new(&self.inner, self.inner.type_)
+    pub fn format_iter(&self) -> ioctl::FormatIterator<Device> {
+        ioctl::FormatIterator::new(self.inner.device.as_ref(), self.inner.type_)
     }
 
     pub fn get_selection(&self, target: SelectionTarget) -> Result<Rect, ioctl::GSelectionError> {
@@ -516,51 +509,89 @@ impl<D: Direction, P: BufferHandles> TryDequeue for Queue<D, BuffersAllocated<P>
     }
 }
 
+#[derive(Debug, Error)]
+pub enum TryGetBufferError {
+    #[error("buffer with provided index {0} does not exist")]
+    InvalidIndex(usize),
+    #[error("buffer is already in use")]
+    AlreadyUsed,
+}
+
+#[derive(Debug, Error)]
+pub enum GetFreeBufferError {
+    #[error("all buffers are currently being used")]
+    NoFreeBuffer,
+}
+
 mod private {
+    use std::ops::Deref;
+
     use super::*;
 
-    /// Private trait for providing a Queuable regardless of the queue's
-    /// direction. Avoids duplicating the same code in
-    /// Capture/OutputQueueableProvider's implementations.
-    pub trait GetBufferByIndex<'a> {
-        type Queueable: 'a;
+    /// The lifetime `'a` is here to allow implementations to attach the lifetime of their return
+    /// value to `self`. This is useful when we want the buffer to hold a reference to the queue
+    /// that prevents the latter from mutating as long as the buffer is not consumed.
+    pub trait QueueableProvider<'a> {
+        type Queueable;
+    }
 
+    /// Private trait for providing a Queuable regardless of the queue's direction.
+    ///
+    /// This avoids duplicating the same code in Capture/OutputQueueableProvider's implementations.
+    pub trait GetBufferByIndex<'a>: QueueableProvider<'a> {
         fn try_get_buffer(&'a self, index: usize) -> Result<Self::Queueable, TryGetBufferError>;
     }
 
     /// Same as `GetBufferByIndex` but for providing any free buffer.
-    pub trait GetFreeBuffer<'a, ErrorType = GetFreeBufferError>: GetBufferByIndex<'a> {
-        fn try_get_free_buffer(&'a self) -> Result<Self::Queueable, ErrorType>;
+    pub trait GetFreeBuffer<'a>: QueueableProvider<'a> {
+        fn try_get_free_buffer(&'a self) -> Result<Self::Queueable, GetFreeBufferError>;
+    }
+
+    impl<'a, D: Direction, P: PrimitiveBufferHandles> QueueableProvider<'a>
+        for Queue<D, BuffersAllocated<P>>
+    {
+        type Queueable = QBuffer<D, P, P, &'a Queue<D, BuffersAllocated<P>>>;
     }
 
     impl<'a, D: Direction, P: PrimitiveBufferHandles> GetBufferByIndex<'a>
         for Queue<D, BuffersAllocated<P>>
     {
-        type Queueable = QBuffer<'a, D, P, P>;
-
         // Take buffer `id` in order to prepare it for queueing, provided it is available.
         fn try_get_buffer(&'a self, index: usize) -> Result<Self::Queueable, TryGetBufferError> {
             Ok(QBuffer::new(self, self.try_obtain_buffer(index)?))
         }
     }
 
-    impl<'a, D: Direction> GetBufferByIndex<'a> for Queue<D, BuffersAllocated<GenericBufferHandles>> {
-        type Queueable = GenericQBuffer<'a, D>;
+    impl<'a, D, P, Q> QueueableProvider<'a> for Q
+    where
+        D: Direction,
+        P: PrimitiveBufferHandles,
+        Q: Deref<Target = Queue<D, BuffersAllocated<P>>> + Clone,
+    {
+        type Queueable = QBuffer<D, P, P, Q>;
+    }
 
+    /// Allows to obtain a [`QBuffer`] with a `'static` lifetime from e.g. an `Arc<Queue>`.
+    ///
+    /// [`QBuffer`]s obtained directly from a [`Queue`] maintain consistency by holding a reference
+    /// to the [`Queue`], which can be inconvenient if we need to keep the [`QBuffer`] aside for
+    /// some time. This implementation allows [`QBuffer`]s to be created with a static lifetime
+    /// from a queue behind a cloneable and dereferencable type (typically [`std::rc::Rc`] or
+    /// [`std::sync::Arc`]).
+    ///
+    /// This added flexibility comes with the counterpart that the user must unwrap the [`Queue`]
+    /// from its container reference before applying mutable operations to it like
+    /// [`Queue::request_buffers`]. Doing so requires calling methods like
+    /// [`std::sync::Arc::into_inner`], which only succeed if there is no other reference to the
+    /// queue, preserving consistency explicitly at runtime instead of implicitly at compile-time.
+    impl<'a, D, P, Q> GetBufferByIndex<'a> for Q
+    where
+        D: Direction,
+        P: PrimitiveBufferHandles,
+        Q: Deref<Target = Queue<D, BuffersAllocated<P>>> + Clone,
+    {
         fn try_get_buffer(&'a self, index: usize) -> Result<Self::Queueable, TryGetBufferError> {
-            let buffer_info = self.try_obtain_buffer(index)?;
-
-            Ok(match self.state.memory_type {
-                GenericSupportedMemoryType::Mmap => {
-                    GenericQBuffer::Mmap(QBuffer::new(self, buffer_info))
-                }
-                GenericSupportedMemoryType::UserPtr => {
-                    GenericQBuffer::User(QBuffer::new(self, buffer_info))
-                }
-                GenericSupportedMemoryType::DmaBuf => {
-                    GenericQBuffer::DmaBuf(QBuffer::new(self, buffer_info))
-                }
-            })
+            Ok(QBuffer::new(self.clone(), self.try_obtain_buffer(index)?))
         }
     }
 
@@ -571,43 +602,111 @@ mod private {
         Self: GetBufferByIndex<'a>,
     {
         fn try_get_free_buffer(&'a self) -> Result<Self::Queueable, GetFreeBufferError> {
-            let res = self
-                .state
+            self.state
                 .buffer_info
                 .iter()
                 .enumerate()
-                .find(|(_, s)| s.do_with_state(|s| matches!(s, BufferState::Free)));
+                .find(|(_, s)| s.do_with_state(|s| matches!(s, BufferState::Free)))
+                .ok_or(GetFreeBufferError::NoFreeBuffer)
+                // We found a buffer with a `Free` state, so calling `try_get_buffer` on it is
+                // guaranteed to succeed.
+                .map(|(i, _)| self.try_get_buffer(i).unwrap())
+        }
+    }
 
-            match res {
-                None => Err(GetFreeBufferError::NoFreeBuffer),
-                Some((i, _)) => Ok(self.try_get_buffer(i).unwrap()),
-            }
+    /// Allows to obtain a [`QBuffer`] with a `'static` lifetime from e.g. an `Arc<Queue>`.
+    ///
+    /// [`QBuffer`]s obtained directly from a [`Queue`] maintain consistency by holding a reference
+    /// to the [`Queue`], which can be inconvenient if we need to keep the [`QBuffer`] aside for
+    /// some time. This implementation allows [`QBuffer`]s to be created with a static lifetime
+    /// from a queue behind a cloneable and dereferencable type (typically [`std::rc::Rc`] or
+    /// [`std::sync::Arc`]).
+    ///
+    /// This added flexibility comes with the counterpart that the user must unwrap the [`Queue`]
+    /// from its container reference before applying mutable operations to it like
+    /// [`Queue::request_buffers`]. Doing so requires calling methods like
+    /// [`std::sync::Arc::into_inner`], which only succeed if there is no other reference to the
+    /// queue, preserving consistency explicitly at runtime instead of implicitly at compile-time.
+    impl<'a, D, P, Q> GetFreeBuffer<'a> for Q
+    where
+        D: Direction,
+        P: PrimitiveBufferHandles,
+        Q: Deref<Target = Queue<D, BuffersAllocated<P>>> + Clone,
+    {
+        fn try_get_free_buffer(&'a self) -> Result<Self::Queueable, GetFreeBufferError> {
+            self.state
+                .buffer_info
+                .iter()
+                .enumerate()
+                .find(|(_, s)| s.do_with_state(|s| matches!(s, BufferState::Free)))
+                .ok_or(GetFreeBufferError::NoFreeBuffer)
+                // We found a buffer with a `Free` state, so calling `try_get_buffer` on it is
+                // guaranteed to succeed.
+                .map(|(i, _)| self.try_get_buffer(i).unwrap())
         }
     }
 }
 
-impl<'a, P: PrimitiveBufferHandles> CaptureQueueableProvider<'a, P>
-    for Queue<Capture, BuffersAllocated<P>>
-where
-    Self: private::GetBufferByIndex<'a>,
-    <Self as private::GetBufferByIndex<'a>>::Queueable: CaptureQueueable<P>,
-{
-    type Queueable = <Self as private::GetBufferByIndex<'a>>::Queueable;
+/// Trait for queueable CAPTURE buffers. These buffers only require handles to
+/// be queued.
+pub trait CaptureQueueable<B: BufferHandles> {
+    /// Queue the buffer after binding `handles`, consuming the object.
+    /// The number of handles must match the buffer's expected number of planes.
+    fn queue_with_handles(self, handles: B) -> QueueResult<(), B>;
 }
 
-impl<'a, P: PrimitiveBufferHandles> OutputQueueableProvider<'a, P>
-    for Queue<Output, BuffersAllocated<P>>
-where
-    Self: private::GetBufferByIndex<'a>,
-    <Self as private::GetBufferByIndex<'a>>::Queueable: OutputQueueable<P>,
-{
-    type Queueable = <Self as private::GetBufferByIndex<'a>>::Queueable;
+/// Trait for queueable OUTPUT buffers. The number of bytes used must be
+/// specified for each plane.
+pub trait OutputQueueable<B: BufferHandles> {
+    /// Queue the buffer after binding `handles`, consuming the object.
+    /// The number of handles must match the buffer's expected number of planes.
+    /// `bytes_used` must be a slice with as many slices as there are handles,
+    /// describing the amount of useful data in each of them.
+    fn queue_with_handles(self, handles: B, bytes_used: &[usize]) -> QueueResult<(), B>;
 }
 
-impl<'a, P: BufferHandles, R> GetOutputBufferByIndex<'a, P> for Queue<Output, BuffersAllocated<P>>
+/// Trait for all objects that are capable of providing objects that can be
+/// queued to the CAPTURE queue.
+pub trait CaptureQueueableProvider<'a, B: BufferHandles> {
+    type Queueable: CaptureQueueable<B>;
+}
+
+impl<'a, B, Q> CaptureQueueableProvider<'a, B> for Q
 where
-    Self: private::GetBufferByIndex<'a, Queueable = R>,
-    Self: OutputQueueableProvider<'a, P, Queueable = R>,
+    B: BufferHandles,
+    Q: private::QueueableProvider<'a>,
+    Q::Queueable: CaptureQueueable<B>,
+{
+    type Queueable = <Self as private::QueueableProvider<'a>>::Queueable;
+}
+
+/// Trait for all objects that are capable of providing objects that can be
+/// queued to the CAPTURE queue.
+pub trait OutputQueueableProvider<'a, B: BufferHandles> {
+    type Queueable: OutputQueueable<B>;
+}
+
+impl<'a, B, Q> OutputQueueableProvider<'a, B> for Q
+where
+    B: BufferHandles,
+    Q: private::QueueableProvider<'a>,
+    Q::Queueable: OutputQueueable<B>,
+{
+    type Queueable = <Self as private::QueueableProvider<'a>>::Queueable;
+}
+
+pub trait GetOutputBufferByIndex<'a, B, ErrorType = TryGetBufferError>
+where
+    B: BufferHandles,
+    Self: OutputQueueableProvider<'a, B>,
+{
+    fn try_get_buffer(&'a self, index: usize) -> Result<Self::Queueable, ErrorType>;
+}
+
+impl<'a, B: BufferHandles> GetOutputBufferByIndex<'a, B> for Queue<Output, BuffersAllocated<B>>
+where
+    Self: private::GetBufferByIndex<'a>,
+    <Self as private::QueueableProvider<'a>>::Queueable: OutputQueueable<B>,
 {
     // Take buffer `id` in order to prepare it for queueing, provided it is available.
     fn try_get_buffer(&'a self, index: usize) -> Result<Self::Queueable, TryGetBufferError> {
@@ -615,10 +714,17 @@ where
     }
 }
 
-impl<'a, P: BufferHandles, R> GetCaptureBufferByIndex<'a, P> for Queue<Capture, BuffersAllocated<P>>
+pub trait GetCaptureBufferByIndex<'a, P: BufferHandles, ErrorType = TryGetBufferError>
 where
-    Self: private::GetBufferByIndex<'a, Queueable = R>,
-    Self: CaptureQueueableProvider<'a, P, Queueable = R>,
+    Self: CaptureQueueableProvider<'a, P>,
+{
+    fn try_get_buffer(&'a self, index: usize) -> Result<Self::Queueable, ErrorType>;
+}
+
+impl<'a, P: BufferHandles> GetCaptureBufferByIndex<'a, P> for Queue<Capture, BuffersAllocated<P>>
+where
+    Self: private::GetBufferByIndex<'a>,
+    <Self as private::QueueableProvider<'a>>::Queueable: CaptureQueueable<P>,
 {
     // Take buffer `id` in order to prepare it for queueing, provided it is available.
     fn try_get_buffer(&'a self, index: usize) -> Result<Self::Queueable, TryGetBufferError> {
@@ -626,20 +732,34 @@ where
     }
 }
 
-impl<'a, P: BufferHandles, R> GetFreeOutputBuffer<'a, P> for Queue<Output, BuffersAllocated<P>>
+pub trait GetFreeOutputBuffer<'a, P: BufferHandles, ErrorType = GetFreeBufferError>
 where
-    Self: private::GetFreeBuffer<'a, Queueable = R>,
-    Self: OutputQueueableProvider<'a, P, Queueable = R>,
+    Self: OutputQueueableProvider<'a, P>,
+{
+    fn try_get_free_buffer(&'a self) -> Result<Self::Queueable, ErrorType>;
+}
+
+impl<'a, P: BufferHandles, Q> GetFreeOutputBuffer<'a, P> for Q
+where
+    Self: private::GetFreeBuffer<'a>,
+    <Self as private::QueueableProvider<'a>>::Queueable: OutputQueueable<P>,
 {
     fn try_get_free_buffer(&'a self) -> Result<Self::Queueable, GetFreeBufferError> {
         <Self as private::GetFreeBuffer<'a>>::try_get_free_buffer(self)
     }
 }
 
-impl<'a, P: BufferHandles, R> GetFreeCaptureBuffer<'a, P> for Queue<Capture, BuffersAllocated<P>>
+pub trait GetFreeCaptureBuffer<'a, P: BufferHandles, ErrorType = GetFreeBufferError>
 where
-    Self: private::GetFreeBuffer<'a, Queueable = R>,
-    Self: CaptureQueueableProvider<'a, P, Queueable = R>,
+    Self: CaptureQueueableProvider<'a, P>,
+{
+    fn try_get_free_buffer(&'a self) -> Result<Self::Queueable, ErrorType>;
+}
+
+impl<'a, P: BufferHandles, Q> GetFreeCaptureBuffer<'a, P> for Q
+where
+    Self: private::GetFreeBuffer<'a>,
+    <Self as private::QueueableProvider<'a>>::Queueable: CaptureQueueable<P>,
 {
     fn try_get_free_buffer(&'a self) -> Result<Self::Queueable, GetFreeBufferError> {
         <Self as private::GetFreeBuffer<'a>>::try_get_free_buffer(self)
