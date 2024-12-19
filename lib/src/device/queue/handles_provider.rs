@@ -7,6 +7,9 @@ use std::{
 
 use log::error;
 
+use crate::device::queue::{
+    GetCaptureBufferByIndex, GetFreeBufferError, GetFreeCaptureBuffer, TryGetBufferError,
+};
 use crate::{
     bindings,
     device::poller::Waker,
@@ -15,12 +18,6 @@ use crate::{
 };
 
 use thiserror::Error;
-
-use super::qbuf::{
-    get_free::{GetFreeBufferError, GetFreeCaptureBuffer},
-    get_indexed::{GetCaptureBufferByIndex, TryGetBufferError},
-    CaptureQueueableProvider,
-};
 
 #[derive(Debug, Error)]
 pub enum GetSuitableBufferError {
@@ -42,10 +39,7 @@ pub trait HandlesProvider: Send + 'static {
         &self,
         _handles: &Self::HandleType,
         queue: &'a Q,
-    ) -> Result<
-        <Q as CaptureQueueableProvider<'a, Self::HandleType>>::Queueable,
-        GetSuitableBufferError,
-    >
+    ) -> Result<Q::Queueable, GetSuitableBufferError>
     where
         Q: GetCaptureBufferByIndex<'a, Self::HandleType>
             + GetFreeCaptureBuffer<'a, Self::HandleType>,
@@ -66,10 +60,7 @@ impl<P: HandlesProvider> HandlesProvider for Box<P> {
         &self,
         handles: &Self::HandleType,
         queue: &'a Q,
-    ) -> Result<
-        <Q as CaptureQueueableProvider<'a, Self::HandleType>>::Queueable,
-        GetSuitableBufferError,
-    >
+    ) -> Result<Q::Queueable, GetSuitableBufferError>
     where
         Q: GetCaptureBufferByIndex<'a, Self::HandleType>
             + GetFreeCaptureBuffer<'a, Self::HandleType>,
@@ -89,10 +80,7 @@ impl<P: HandlesProvider + Sync> HandlesProvider for Arc<P> {
         &self,
         handles: &Self::HandleType,
         queue: &'a Q,
-    ) -> Result<
-        <Q as CaptureQueueableProvider<'a, Self::HandleType>>::Queueable,
-        GetSuitableBufferError,
-    >
+    ) -> Result<Q::Queueable, GetSuitableBufferError>
     where
         Q: GetCaptureBufferByIndex<'a, Self::HandleType>
             + GetFreeCaptureBuffer<'a, Self::HandleType>,
