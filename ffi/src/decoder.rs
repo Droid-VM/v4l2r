@@ -28,7 +28,7 @@ use v4l2r::{
         CompletedInputBuffer, DecoderEvent, DecoderEventCallback, FormatChangedCallback,
         FormatChangedReply, InputDoneCallback,
     },
-    device::queue::{direction::Capture, dqbuf::DqBuffer, qbuf::OutputQueueable, FormatBuilder},
+    device::queue::{direction::Capture, dqbuf::DqBuffer, FormatBuilder, OutputQueueable},
     memory::DmaBufHandle,
     PixelFormat, PlaneLayout, Rect,
 };
@@ -139,13 +139,10 @@ fn set_capture_format_cb(
     desired_pixel_format: Option<PixelFormat>,
     visible_rect: Rect,
     min_num_buffers: usize,
-    decoder: *mut v4l2r_decoder,
+    decoder: &mut v4l2r_decoder,
     event_cb: v4l2r_decoder_event_cb,
     cb_data: *mut c_void,
 ) -> anyhow::Result<FormatChangedReply<Arc<v4l2r_video_frame_provider>>> {
-    // Safe unless the C part did something funny with the decoder returned by
-    // `v4l2r_decoder_new`.
-    let decoder = unsafe { decoder.as_mut().unwrap() };
     let mut v4l2_format: bindings::v4l2_format = match desired_pixel_format {
         Some(format) => f.set_pixelformat(format).apply()?,
         None => f.apply()?,
@@ -213,6 +210,7 @@ fn frame_decoded_cb(
         // Should be safe as `provider` is initialized in the format
         // change callback and is thus valid, as well as `frame`.
         match &decoder.provider {
+            // SAFETY: `provider` is a valid pointer to a frame provider.
             Some(provider) => unsafe {
                 v4l2r_video_frame_provider_queue_frame(provider.as_ref(), frame);
             },
@@ -330,6 +328,8 @@ fn v4l2r_decoder_new_safe(
         let decoder_ptr = decoder_ptr;
         let cb_data = cb_data;
 
+        // SAFETY: `decoder_ptr` will be initialized with a valid decoder by the time this
+        // callback is called.
         let decoder = unsafe { decoder_ptr.0.as_mut().unwrap() };
 
         match event {
@@ -367,12 +367,16 @@ fn v4l2r_decoder_new_safe(
                 let decoder_ptr = decoder_ptr;
                 let cb_data = cb_data;
 
+                // SAFETY: `decoder_ptr` will be initialized with a valid decoder by the time this
+                // callback is called.
+                let decoder = unsafe { decoder_ptr.0.as_mut().unwrap() };
+
                 set_capture_format_cb(
                     f,
                     output_format,
                     visible_rect,
                     min_num_buffers,
-                    decoder_ptr.0,
+                    decoder,
                     event_cb,
                     cb_data.0,
                 )
@@ -396,6 +400,7 @@ fn v4l2r_decoder_new_safe(
         input_buf_size: input_format.plane_fmt[0].sizeimage as u64,
     };
 
+    // SAFETY: `decoder` is a `v4l2r_decoder`, the same type expected by `decoder_box`.
     let decoder_box = unsafe {
         // Replace our uninitialized heap memory with our valid decoder.
         decoder_box.as_mut_ptr().write(decoder);

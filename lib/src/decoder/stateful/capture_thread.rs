@@ -6,14 +6,8 @@ use crate::{
     device::{
         poller::{DeviceEvent, PollEvent, Poller, Waker},
         queue::{
-            self,
-            direction::Capture,
-            handles_provider::HandlesProvider,
-            qbuf::{
-                get_free::GetFreeCaptureBuffer, get_indexed::GetCaptureBufferByIndex,
-                CaptureQueueable,
-            },
-            BuffersAllocated, Queue, QueueInit,
+            self, direction::Capture, handles_provider::HandlesProvider, BuffersAllocated,
+            CaptureQueueable, GetCaptureBufferByIndex, GetFreeCaptureBuffer, Queue, QueueInit,
         },
         AllocatedQueue, Device, Stream, TryDequeue,
     },
@@ -255,7 +249,7 @@ where
                 // an infinite number of handles. Break out of the loop when this happens - we will
                 // be called again the next time a CAPTURE buffer becomes available.
                 Err(queue::handles_provider::GetSuitableBufferError::TryGetFree(
-                    queue::qbuf::get_free::GetFreeBufferError::NoFreeBuffer,
+                    queue::GetFreeBufferError::NoFreeBuffer,
                 )) => {
                     break 'enqueue;
                 }
