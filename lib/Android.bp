@@ -12,6 +12,7 @@ rust_library {
     cargo_env_compat: true,
     cargo_pkg_version: "0.0.5",
     crate_root: "src/lib.rs",
+    srcs: [":libv4l2r_bindgen"],
     edition: "2021",
     rustlibs: [
         "libanyhow",
@@ -27,9 +28,6 @@ rust_library {
     ],
     product_available: true,
     vendor_available: true,
-    // Bindgen-generated bindings of our local videodev2.h.
-    srcs: [":libv4l2r_bindgen"],
-
 }
 
 rust_test {
@@ -39,6 +37,7 @@ rust_test {
     cargo_env_compat: true,
     cargo_pkg_version: "0.0.5",
     crate_root: "src/lib.rs",
+    srcs: [":libv4l2r_bindgen"],
     test_suites: ["general-tests"],
     auto_gen_config: true,
     test_options: {
@@ -55,7 +54,9 @@ rust_test {
         "libv4l2r_utils",
     ],
     proc_macros: ["libenumn"],
-    // Bindgen-generated bindings of our local videodev2.h.
-    srcs: [":libv4l2r_bindgen"],
+}
 
+filegroup {
+    name: "libv4l2r_sources",
+    srcs: ["*.rs"],
 }
