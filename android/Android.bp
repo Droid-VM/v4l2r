@@ -4,7 +4,10 @@ package {
 
 rust_binary_host {
     name: "v4l2r_bindgen_build",
-    srcs: ["build.rs"],
+    crate_root: "build.rs",
+    srcs: [
+        ":libv4l2r_sources",
+    ],
     rustlibs: [
         "libbindgen",
         "libbindgen_cmd",
