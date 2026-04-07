@@ -4,3 +4,10 @@ license {
     license_kinds: ["SPDX-license-identifier-MIT"],
     license_text: ["LICENSE"],
 }
+
+subdirs = [
+    "android",
+    "ffi",
+    "lib",
+    "utils",
+]
