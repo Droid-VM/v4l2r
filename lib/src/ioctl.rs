@@ -940,7 +940,15 @@ impl TryFrom<UncheckedV4l2Buffer> for V4l2Buffer {
 
         // Validate plane information
         if queue.is_multiplanar() {
-            if v4l2_buf.length >= bindings::VIDEO_MAX_PLANES {
+            // `length` is the number of entries in the caller's plane array, and V4L2 allows it
+            // to be exactly `VIDEO_MAX_PLANES` -- the kernel checks `num_planes <= length <=
+            // VB2_MAX_PLANES` in `vb2_queue_or_prepare_buf`. This was `>=`, which refused the
+            // legal maximum; ffmpeg sets `length = VIDEO_MAX_PLANES` on every multiplanar buffer
+            // ioctl (`libavdevice/v4l2.c`), so `ffmpeg -f v4l2` could not queue a buffer at all.
+            // `>` is also exactly the bound the slice below needs: `planes` holds
+            // `VIDEO_MAX_PLANES` entries, so `[0..length]` is in bounds for `length <=
+            // VIDEO_MAX_PLANES` and out of bounds for anything larger.
+            if v4l2_buf.length > bindings::VIDEO_MAX_PLANES {
                 return Err(V4l2BufferFromError::InvalidNumberOfPlanes(v4l2_buf.length));
             }
 
@@ -1183,5 +1191,54 @@ mod tests {
         let planes_ptr = v4l2_buf.1.as_mut().map(|p| p.as_mut_ptr()).unwrap();
         let v4l2_buf_ref = v4l2_buf.as_mut();
         assert_eq!(unsafe { v4l2_buf_ref.m.planes }, planes_ptr);
+    }
+
+    /// `length` is how many entries the caller's plane array has, not how many planes the format
+    /// uses, and `VIDEO_MAX_PLANES` of them is the largest legal value: the kernel's
+    /// `__verify_planes_array` accepts `num_planes <= length <= VB2_MAX_PLANES`, and this crate's
+    /// own `new_for_querybuf` sends exactly `VIDEO_MAX_PLANES`. So does ffmpeg, on every
+    /// multiplanar buffer ioctl, which is how the off-by-one here was found.
+    #[test]
+    fn test_v4l2_buffer_from_accepts_video_max_planes() {
+        use super::{V4l2Buffer, V4l2BufferFromError};
+        use crate::memory::MemoryType;
+
+        // A capture buffer with one real plane and the zeroed tail a client leaves behind it,
+        // declaring `length` array entries.
+        let buffer_with_length = |length: u32| {
+            let mut planes: super::V4l2BufferPlanes = Default::default();
+            planes[0].length = 4096;
+            planes[0].bytesused = 4096;
+
+            UncheckedV4l2Buffer(
+                bindings::v4l2_buffer {
+                    type_: QueueType::VideoCaptureMplane as u32,
+                    memory: MemoryType::Mmap as u32,
+                    length,
+                    ..Default::default()
+                },
+                Some(planes),
+            )
+        };
+
+        for length in 1..=bindings::VIDEO_MAX_PLANES {
+            let buffer = match V4l2Buffer::try_from(buffer_with_length(length)) {
+                Ok(buffer) => buffer,
+                Err(e) => panic!("length {} rejected: {}", length, e),
+            };
+            assert_eq!(buffer.num_planes(), length as usize);
+            assert_eq!(buffer.as_v4l2_planes().len(), length as usize);
+            assert_eq!(*buffer.get_first_plane().length, 4096);
+        }
+
+        // One entry more than the plane array can hold is still refused -- and must be, since
+        // the conversion slices `planes[0..length]` right after this check.
+        match V4l2Buffer::try_from(buffer_with_length(bindings::VIDEO_MAX_PLANES + 1)) {
+            Err(V4l2BufferFromError::InvalidNumberOfPlanes(n)) => {
+                assert_eq!(n, bindings::VIDEO_MAX_PLANES + 1)
+            }
+            Err(e) => panic!("wrong error: {}", e),
+            Ok(_) => panic!("a plane array larger than VIDEO_MAX_PLANES was accepted"),
+        }
     }
 }
