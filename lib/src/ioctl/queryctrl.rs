@@ -31,6 +31,14 @@ impl CtrlId {
     }
 }
 
+/// The validated `V4L2_CID_*` value, for a device that answers `QUERYCTRL` itself and needs to
+/// look the control up.
+impl From<CtrlId> for u32 {
+    fn from(ctrl: CtrlId) -> Self {
+        ctrl.0
+    }
+}
+
 bitflags! {
     #[derive(Clone, Copy, Debug)]
     pub struct QueryCtrlFlags: u32 {
